@@ -3,119 +3,113 @@ import streamlit as st
 import pandas as pd
 import joblib
 import ipaddress
-import os
 
-from urllib.parse import urlparse
-from datetime import datetime
+from urllib.parse import (
+    urlparse,
+    urlsplit,
+    urlunsplit,
+    parse_qsl,
+    urlencode
+)
 
-
-# ---------------------------------------------------------
-# CONFIGURACIÓN GENERAL
-# ---------------------------------------------------------
+# ============================================================
+# CONFIGURACIÓN DE LA APLICACIÓN
+# ============================================================
 
 st.set_page_config(
     page_title="SAFE URL Scan",
     page_icon="🛡️",
-    layout="wide"
+    layout="centered"
 )
 
+# ============================================================
+# CARGA DE ARTEFACTOS FINALES
+# ============================================================
 
-# ---------------------------------------------------------
-# ESTILO VISUAL
-# ---------------------------------------------------------
+# Los archivos estarán en la misma carpeta que app.py
+# dentro del repositorio de GitHub.
 
-st.markdown("""
-<style>
+MODELO_PATH = "modelo_safe_final.pkl"
+VARIABLES_PATH = "variables_safe_final.pkl"
 
-.block-container {
-    padding-top: 2rem;
-    padding-bottom: 3rem;
-}
+modelo = joblib.load(MODELO_PATH)
+variables = joblib.load(VARIABLES_PATH)
 
-.safe-title {
-    font-size: 42px;
-    font-weight: 800;
-    margin-bottom: 0px;
-}
+# ============================================================
+# NORMALIZACIÓN SAFE
+# ============================================================
 
-.safe-subtitle {
-    color: #64748b;
-    font-size: 18px;
-    margin-bottom: 30px;
-}
+def normalizar_url_safe(url):
 
-.safe-card {
-    border: 1px solid #e2e8f0;
-    border-radius: 16px;
-    padding: 25px;
-    background-color: white;
-    box-shadow: 0px 2px 8px rgba(0,0,0,0.04);
-}
+    url = str(url).strip()
 
-.score-low {
-    color: #16a34a;
-    font-size: 45px;
-    font-weight: 800;
-}
+    try:
+        partes = urlsplit(url)
 
-.score-medium {
-    color: #d97706;
-    font-size: 45px;
-    font-weight: 800;
-}
+        esquema = partes.scheme.lower()
+        dominio = partes.netloc.lower()
+        ruta = partes.path
 
-.score-high {
-    color: #dc2626;
-    font-size: 45px;
-    font-weight: 800;
-}
+        # "/" únicamente en la raíz se considera equivalente
+        # a una ruta vacía.
+        if ruta == "/":
+            ruta = ""
 
-.small-text {
-    color: #64748b;
-    font-size: 14px;
-}
+        # Parámetros conocidos de seguimiento
+        parametros_tracking = {
+            "utm_source",
+            "utm_medium",
+            "utm_campaign",
+            "utm_term",
+            "utm_content",
+            "utm_id",
+            "gclid",
+            "gbraid",
+            "wbraid",
+            "fbclid"
+        }
 
-</style>
-""", unsafe_allow_html=True)
+        parametros = parse_qsl(
+            partes.query,
+            keep_blank_values=True
+        )
 
+        parametros_limpios = [
+            (clave, valor)
+            for clave, valor in parametros
+            if clave.lower() not in parametros_tracking
+        ]
 
-# ---------------------------------------------------------
-# CARGA DEL MODELO
-# ---------------------------------------------------------
+        query_limpia = urlencode(
+            parametros_limpios,
+            doseq=True
+        )
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        # Se eliminan fragmentos
+        return urlunsplit(
+            (
+                esquema,
+                dominio,
+                ruta,
+                query_limpia,
+                ""
+            )
+        )
 
-ruta_modelo = os.path.join(
-    BASE_DIR,
-    "modelo_safe_funcional.pkl"
-)
-
-ruta_variables = os.path.join(
-    BASE_DIR,
-    "variables_safe_funcional.pkl"
-)
-
-
-@st.cache_resource
-def cargar_modelo():
-
-    modelo = joblib.load(ruta_modelo)
-    variables = joblib.load(ruta_variables)
-
-    return modelo, variables
+    except Exception:
+        return url
 
 
-modelo_safe, variables_safe = cargar_modelo()
-
-
-# ---------------------------------------------------------
-# EXTRACTOR SAFE
-# ---------------------------------------------------------
+# ============================================================
+# EXTRACCIÓN DE LAS 17 CARACTERÍSTICAS SAFE
+# ============================================================
 
 def extraer_caracteristicas_safe(url):
 
     url = str(url).strip()
 
+    # Agregar esquema temporal si la URL no lo contiene,
+    # únicamente para facilitar el parseo.
     url_parseo = url
 
     if not url_parseo.startswith(
@@ -127,11 +121,19 @@ def extraer_caracteristicas_safe(url):
 
     dominio = parsed.netloc.lower()
 
+    # --------------------------------------------------------
+    # TLD
+    # --------------------------------------------------------
+
     tld = (
         dominio.split(".")[-1]
         if "." in dominio
         else ""
     )
+
+    # --------------------------------------------------------
+    # Verificar si el dominio es una IP
+    # --------------------------------------------------------
 
     try:
         ipaddress.ip_address(
@@ -142,6 +144,9 @@ def extraer_caracteristicas_safe(url):
     except ValueError:
         es_ip = 0
 
+    # --------------------------------------------------------
+    # Conteo de caracteres
+    # --------------------------------------------------------
 
     letras = sum(
         c.isalpha()
@@ -158,9 +163,11 @@ def extraer_caracteristicas_safe(url):
         for c in url
     )
 
+    # --------------------------------------------------------
+    # Número de subdominios
+    # --------------------------------------------------------
 
     partes_dominio = dominio.split(".")
-
 
     if dominio.startswith("www."):
 
@@ -174,47 +181,63 @@ def extraer_caracteristicas_safe(url):
             partes_dominio[:-2]
         )
 
-
     numero_subdominios = max(
         len(partes_subdominio),
         0
     )
 
+    # --------------------------------------------------------
+    # Las 17 características SAFE
+    # --------------------------------------------------------
 
-    caracteristicas = {
+    return {
 
-        "safe_url_length": len(url),
-        "safe_domain_length": len(dominio),
-        "safe_tld_length": len(tld),
+        "safe_url_length":
+            len(url),
+
+        "safe_domain_length":
+            len(dominio),
+
+        "safe_tld_length":
+            len(tld),
 
         "safe_is_https":
             1 if parsed.scheme.lower() == "https"
             else 0,
 
-        "safe_is_domain_ip": es_ip,
+        "safe_is_domain_ip":
+            es_ip,
 
         "safe_no_subdomains":
             numero_subdominios,
 
-        "safe_no_letters": letras,
+        "safe_no_letters":
+            letras,
 
         "safe_letter_ratio":
             letras / len(url)
             if len(url) > 0
             else 0,
 
-        "safe_no_digits": digitos,
+        "safe_no_digits":
+            digitos,
 
         "safe_digit_ratio":
             digitos / len(url)
             if len(url) > 0
             else 0,
 
-        "safe_no_equals": url.count("="),
-        "safe_no_question": url.count("?"),
-        "safe_no_ampersand": url.count("&"),
+        "safe_no_equals":
+            url.count("="),
 
-        "safe_no_special": especiales,
+        "safe_no_question":
+            url.count("?"),
+
+        "safe_no_ampersand":
+            url.count("&"),
+
+        "safe_no_special":
+            especiales,
 
         "safe_special_ratio":
             especiales / len(url)
@@ -230,184 +253,187 @@ def extraer_caracteristicas_safe(url):
             else 0
     }
 
-    return caracteristicas
 
+# ============================================================
+# MOTOR DE EVALUACIÓN SAFE
+# ============================================================
 
-# ---------------------------------------------------------
-# MOTOR SAFE
-# ---------------------------------------------------------
+def evaluar_url(url):
 
-def evaluar_url_safe(url):
+    # --------------------------------------------------------
+    # 1. Normalización
+    # --------------------------------------------------------
 
-    caracteristicas = (
-        extraer_caracteristicas_safe(url)
+    url_normalizada = normalizar_url_safe(
+        url
     )
 
-    entrada = pd.DataFrame(
-        [caracteristicas]
+    # --------------------------------------------------------
+    # 2. Extracción de características
+    # --------------------------------------------------------
+
+    caracteristicas = extraer_caracteristicas_safe(
+        url_normalizada
     )
 
-    entrada = entrada[
-        variables_safe
-    ]
+    # --------------------------------------------------------
+    # 3. Orden de variables esperado por el modelo
+    # --------------------------------------------------------
 
-
-    probabilidades = (
-        modelo_safe.predict_proba(
-            entrada
-        )[0]
+    X_url = pd.DataFrame(
+        [
+            [
+                caracteristicas[var]
+                for var in variables
+            ]
+        ],
+        columns=variables
     )
 
+    # --------------------------------------------------------
+    # 4. Predicción del modelo
+    # --------------------------------------------------------
 
-    indice_phishing = list(
-        modelo_safe.classes_
+    probabilidades = modelo.predict_proba(
+        X_url
+    )[0]
+
+    # Clase 0 = phishing / maliciosa
+    # dentro del dataset de entrenamiento.
+    indice_riesgo = list(
+        modelo.classes_
     ).index(0)
 
+    prob_riesgo = probabilidades[
+        indice_riesgo
+    ]
 
-    indice_legitima = list(
-        modelo_safe.classes_
-    ).index(1)
+    # --------------------------------------------------------
+    # 5. Risk Score SAFE
+    # --------------------------------------------------------
 
-
-    prob_phishing = (
-        probabilidades[
-            indice_phishing
-        ]
+    risk_score = float(
+        round(
+            prob_riesgo * 100,
+            2
+        )
     )
 
-
-    prob_legitima = (
-        probabilidades[
-            indice_legitima
-        ]
-    )
-
-
-    risk_score = (
-        prob_phishing * 100
-    )
-
+    # --------------------------------------------------------
+    # 6. Interpretación del resultado
+    # --------------------------------------------------------
 
     if risk_score < 30:
 
-        nivel = "Bajo"
-        accion = "Permitir navegación"
-        clase_css = "score-low"
-        icono = "🟢"
+        nivel = (
+            "Riesgo estructural bajo"
+        )
+
+        mensaje = (
+            "No se identifican patrones estructurales "
+            "relevantes de riesgo."
+        )
+
+        accion = (
+            "Continuar con los controles habituales "
+            "de navegación."
+        )
 
     elif risk_score < 70:
 
-        nivel = "Medio"
-        accion = "Advertir al usuario"
-        clase_css = "score-medium"
-        icono = "🟡"
+        nivel = (
+            "Riesgo estructural medio"
+        )
+
+        mensaje = (
+            "Se identifican algunos patrones estructurales "
+            "que requieren revisión."
+        )
+
+        accion = (
+            "Validar el dominio, la fuente y el contexto "
+            "antes de realizar acciones sensibles."
+        )
 
     else:
 
-        nivel = "Alto"
-        accion = "Bloquear URL o escalar caso"
-        clase_css = "score-high"
-        icono = "🔴"
+        nivel = (
+            "Riesgo estructural alto"
+        )
 
+        mensaje = (
+            "La URL presenta patrones estructurales "
+            "asociados con mayor riesgo."
+        )
+
+        accion = (
+            "Realizar verificaciones adicionales antes de "
+            "ingresar credenciales, efectuar pagos, permitir "
+            "la navegación o bloquear el acceso."
+        )
 
     return {
 
-        "url": url,
+        "url_original":
+            url,
+
+        "url_normalizada":
+            url_normalizada,
 
         "risk_score":
-            round(risk_score, 2),
+            risk_score,
 
         "nivel":
             nivel,
 
+        "mensaje":
+            mensaje,
+
         "accion":
-            accion,
-
-        "prob_phishing":
-            prob_phishing * 100,
-
-        "prob_legitima":
-            prob_legitima * 100,
-
-        "caracteristicas":
-            caracteristicas,
-
-        "clase_css":
-            clase_css,
-
-        "icono":
-            icono
+            accion
     }
 
 
-# ---------------------------------------------------------
-# SIDEBAR
-# ---------------------------------------------------------
+# ============================================================
+# INTERFAZ SAFE URL SCAN
+# ============================================================
 
-with st.sidebar:
-
-    st.markdown("# 🛡️ SAFE")
-    st.markdown("### URL Scan")
-
-    st.divider()
-
-    st.markdown(
-        "**Smart AI Fraud Evaluation**"
-    )
-
-    st.write(
-        "Sistema inteligente para la evaluación "
-        "del riesgo de URLs potencialmente fraudulentas."
-    )
-
-    st.divider()
-
-    st.markdown("**Modelo:** Random Forest")
-    st.markdown("**Variables:** 17")
-    st.markdown("**Versión:** 1.0")
-
-
-# ---------------------------------------------------------
-# ENCABEZADO
-# ---------------------------------------------------------
-
-st.markdown(
-    '<div class="safe-title">'
-    'Análisis de URL'
-    '</div>',
-    unsafe_allow_html=True
+st.title(
+    "🛡️ SAFE URL Scan"
 )
 
-st.markdown(
-    '<div class="safe-subtitle">'
-    'Ingresa una URL para analizar su nivel de riesgo mediante SAFE.'
-    '</div>',
-    unsafe_allow_html=True
+st.caption(
+    "Smart AI Fraud Evaluation"
 )
 
+st.write(
+    "Evaluación preliminar de riesgo estructural en URLs."
+)
 
-# ---------------------------------------------------------
+st.info(
+    "SAFE analiza patrones estructurales de una URL. "
+    "El resultado no constituye una confirmación automática "
+    "de phishing ni una garantía absoluta de seguridad."
+)
+
+# ------------------------------------------------------------
 # INPUT
-# ---------------------------------------------------------
+# ------------------------------------------------------------
 
 url_usuario = st.text_input(
     "URL para analizar",
     placeholder="https://www.ejemplo.com"
 )
 
+# ------------------------------------------------------------
+# BOTÓN DE ANÁLISIS
+# ------------------------------------------------------------
 
-analizar = st.button(
+if st.button(
     "🔎 Analizar URL",
     type="primary",
     use_container_width=True
-)
-
-
-# ---------------------------------------------------------
-# RESULTADO
-# ---------------------------------------------------------
-
-if analizar:
+):
 
     if not url_usuario.strip():
 
@@ -417,138 +443,187 @@ if analizar:
 
     else:
 
-        resultado = evaluar_url_safe(
-            url_usuario
-        )
+        try:
 
-        st.divider()
-
-        st.markdown(
-            "## Resultado del análisis"
-        )
-
-
-        col1, col2 = st.columns(
-            [1, 2]
-        )
-
-
-        with col1:
-
-            st.markdown(
-                f"""
-                <div class="safe-card">
-                    <div class="{resultado['clase_css']}">
-                        {resultado['risk_score']}
-                    </div>
-
-                    <div class="small-text">
-                        RISK SCORE / 100
-                    </div>
-
-                    <br>
-
-                    <h2>
-                    {resultado['icono']}
-                    Riesgo {resultado['nivel']}
-                    </h2>
-
-                </div>
-                """,
-                unsafe_allow_html=True
+            resultado = evaluar_url(
+                url_usuario
             )
 
+            score = resultado[
+                "risk_score"
+            ]
 
-        with col2:
+            st.divider()
 
-            st.markdown(
-                f"""
-                <div class="safe-card">
+            # =================================================
+            # RESULTADO
+            # =================================================
 
-                <h3>
-                Acción recomendada
-                </h3>
-
-                <h2>
-                {resultado['accion']}
-                </h2>
-
-                <br>
-
-                <b>URL analizada:</b><br>
-
-                {resultado['url']}
-
-                </div>
-                """,
-                unsafe_allow_html=True
+            st.subheader(
+                "Resultado del análisis"
             )
-
-
-        st.write("")
-
-
-        c1, c2, c3 = st.columns(3)
-
-
-        with c1:
 
             st.metric(
-                "Probabilidad de phishing",
-                f"{resultado['prob_phishing']:.2f}%"
+                label="Risk Score SAFE",
+                value=f"{score:.2f} / 100"
             )
 
+            # -------------------------------------------------
+            # NIVEL DE RIESGO
+            # -------------------------------------------------
 
-        with c2:
+            if score < 30:
 
-            st.metric(
-                "Probabilidad de legitimidad",
-                f"{resultado['prob_legitima']:.2f}%"
+                st.success(
+                    f"🟢 {resultado['nivel']}"
+                )
+
+            elif score < 70:
+
+                st.warning(
+                    f"🟡 {resultado['nivel']}"
+                )
+
+            else:
+
+                st.error(
+                    f"🔴 {resultado['nivel']}"
+                )
+
+            st.write(
+                resultado["mensaje"]
             )
 
+            # =================================================
+            # ACCIÓN RECOMENDADA
+            # =================================================
 
-        with c3:
-
-            st.metric(
-                "Modelo",
-                "SAFE Funcional"
+            st.subheader(
+                "Acción recomendada"
             )
 
-
-        st.caption(
-            "Fecha del análisis: "
-            + datetime.now().strftime(
-                "%d/%m/%Y %H:%M:%S"
+            st.write(
+                resultado["accion"]
             )
-        )
 
+            # =================================================
+            # EXPLICACIÓN
+            # =================================================
 
-        with st.expander(
-            "🔍 Ver características analizadas"
-        ):
+            with st.expander(
+                "ℹ️ ¿Qué significa este resultado?"
+            ):
 
-            tabla_caracteristicas = (
-                pd.DataFrame(
+                st.markdown(
+                    """
+SAFE analiza características **estructurales y léxicas**
+de la URL, como:
+
+- longitud de la dirección;
+- longitud del dominio;
+- cantidad de subdominios;
+- caracteres especiales;
+- números y letras;
+- presencia de `@` o guiones;
+- uso de HTTPS;
+- estructura general de la URL.
+
+Un **Risk Score elevado** significa que la estructura
+analizada presenta similitudes con patrones asociados
+a URLs de riesgo dentro del conjunto utilizado para
+entrenar el modelo.
+
+**Un puntaje alto no confirma que el sitio sea phishing.**
+
+De igual forma, un puntaje bajo no constituye una
+garantía absoluta de seguridad.
+
+SAFE debe utilizarse como una **señal de apoyo** para
+determinar si son necesarias validaciones adicionales.
+                    """
+                )
+
+            # =================================================
+            # RECOMENDACIONES SEGÚN CONTEXTO
+            # =================================================
+
+            with st.expander(
+                "🧭 ¿Qué puedo verificar adicionalmente?"
+            ):
+
+                st.markdown(
+                    """
+Antes de realizar una acción sensible puedes revisar:
+
+- que el dominio corresponda realmente a la organización;
+- que la URL provenga de una fuente confiable;
+- que no hayas llegado al sitio mediante un enlace sospechoso;
+- que la página utilice HTTPS;
+- que no existan cambios extraños en el dominio;
+- que no te estén solicitando credenciales o pagos
+  de forma inesperada;
+- mecanismos institucionales de ciberseguridad o
+  reputación del dominio cuando estén disponibles.
+                    """
+                )
+
+            # =================================================
+            # INFORMACIÓN TÉCNICA
+            # =================================================
+
+            with st.expander(
+                "🔬 Información técnica"
+            ):
+
+                st.write(
+                    "**URL ingresada:**",
                     resultado[
-                        "caracteristicas"
-                    ].items(),
-                    columns=[
-                        "Característica",
-                        "Valor"
+                        "url_original"
                     ]
                 )
+
+                st.write(
+                    "**URL normalizada:**",
+                    resultado[
+                        "url_normalizada"
+                    ]
+                )
+
+                st.write(
+                    "**Características analizadas:**",
+                    len(variables)
+                )
+
+                st.write(
+                    "**Modelo:** Random Forest"
+                )
+
+                st.write(
+                    "**Tipo de resultado:** "
+                    "Risk Score de riesgo estructural"
+                )
+
+        except Exception as error:
+
+            st.error(
+                "No fue posible analizar la URL."
             )
 
-            st.dataframe(
-                tabla_caracteristicas,
-                use_container_width=True,
-                hide_index=True
+            st.caption(
+                f"Detalle técnico: {error}"
             )
 
 
-        st.info(
-            "SAFE constituye un prototipo académico "
-            "de apoyo a la evaluación del riesgo de URLs. "
-            "El resultado no sustituye los mecanismos "
-            "oficiales de seguridad de una entidad financiera."
-        )
+# ============================================================
+# NOTA METODOLÓGICA
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "SAFE URL Scan es un prototipo académico de apoyo para "
+    "la evaluación preliminar de riesgo estructural. "
+    "No sustituye herramientas especializadas de reputación "
+    "de dominios, listas de amenazas, análisis de contenido "
+    "ni mecanismos institucionales de ciberseguridad."
+)
